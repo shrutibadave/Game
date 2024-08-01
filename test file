@@ -1,0 +1,47 @@
+name: Restore and Move S3 Objects
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-deploy:
+    name: Restore and Move S3 Objects
+    runs-on: [deere-ubuntu-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up AWS CLI
+        uses: aws-actions/configure-aws-cli@v1
+        OKTA_CLIENT_ID: ${{ secrets.OKTA_CLIENT_ID }}
+        OKTA_CLIENT_SECRET: ${{ secrets.OKTA_CLIENT_SECRET }}
+        ROLE_ARN: "arn:aws:iam::788312647127:role/jenkins/appslave-jenkins-channeldssr1india"
+
+
+      - name: Initiate expedited restore for all Glacier objects
+        run: |
+          BUCKET_NAME="cms-codedeploy"
+          aws s3api list-objects-v2 --bucket $BUCKET_NAME --query 'Contents[?StorageClass==`GLACIER` || StorageClass==`DEEP_ARCHIVE`].{Key:Key}' --output text | while read -r object_key; do
+            aws s3api restore-object --bucket $BUCKET_NAME --key "$object_key" --restore-request '{"Days":7,"GlacierJobParameters":{"Tier":"Expedited"}}'
+            echo "Initiated expedited restore for $object_key"
+          done
+
+      - name: Wait for expedited restores to complete
+        run: |
+          echo "Waiting for expedited restores to complete..."
+          sleep 600  # Wait for 10 minutes
+          
+      - name: Check restore status and copy restored objects to STANDARD
+        run: |
+          BUCKET_NAME="cms-codedeploy"
+          aws s3api list-objects-v2 --bucket $BUCKET_NAME --query 'Contents[?StorageClass==`GLACIER` || StorageClass==`DEEP_ARCHIVE`].{Key:Key}' --output text | while read -r object_key; do
+            restore_status=$(aws s3api head-object --bucket $BUCKET_NAME --key "$object_key" --query 'Restore' --output text)
+            if [[ $restore_status == "true" ]]; then
+              aws s3 cp s3://$BUCKET_NAME/$object_key s3://$BUCKET_NAME/$object_key --storage-class STANDARD
+              echo "Moved $object_key to STANDARD storage class"
+
+            else
+              echo "$object_key is not restored yet or still in progress"
+            fi
+          done
